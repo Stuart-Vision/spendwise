@@ -80,7 +80,7 @@ Receipt upload links are signed locally, but actually uploading a file needs a r
 
 ## Deploy to AWS
 
-You need an AWS account and the [SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html).
+You need an AWS account and the [SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html). `sam build` uses esbuild, so run it with `node_modules/.bin` on your PATH (or install esbuild globally).
 
 ```bash
 sam build

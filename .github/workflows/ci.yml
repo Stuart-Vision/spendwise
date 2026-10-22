@@ -32,6 +32,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Put the project's esbuild on PATH for sam build
+        run: echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true

@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SpendWise - serverless expense tracker (API Gateway HTTP API, Lambda, DynamoDB, S3)
+
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Default: '*'
+    Description: Browser origin allowed by CORS (set to your frontend's URL in production)
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]       # Graviton: cheaper per millisecond than x86
+    MemorySize: 256
+    Timeout: 10
+    Tracing: Active              # AWS X-Ray traces across API Gateway, Lambda and DynamoDB
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ExpensesTable
+        BUCKET_NAME: !Sub '${AWS::StackName}-receipts-${AWS::AccountId}'
+        NODE_OPTIONS: --enable-source-maps
+
+Resources:
+  # ---------------------------------------------------------------- API
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: [!Ref AllowedOrigin]
+        AllowMethods: [GET, POST, DELETE, OPTIONS]
+        AllowHeaders: [content-type, x-user-id, idempotency-key]
+        ExposeHeaders: [idempotent-replayed]
+        MaxAge: 600
+      DefaultRouteSettings:    # throttling protects the account from runaway clients
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogs.Arn
+        Format: '{"requestId":"$context.requestId","route":"$context.routeKey","status":"$context.status","latencyMs":"$context.responseLatency","ip":"$context.identity.sourceIp"}'
+
+  ApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+
+  # ---------------------------------------------------------------- Data
+  ExpensesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: date, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      LocalSecondaryIndexes:
+        - IndexName: byDate
+          KeySchema:
+            - { AttributeName: pk, KeyType: HASH }
+            - { AttributeName: date, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  ReceiptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-receipts-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      CorsConfiguration:       # lets the browser POST the file straight to S3
+        CorsRules:
+          - AllowedOrigins: [!Ref AllowedOrigin]
+            AllowedMethods: [POST, GET]
+            AllowedHeaders: ['*']
+            MaxAge: 600
+
+  # ---------------------------------------------------------------- Functions
+  # Each function gets only the permissions it needs (least privilege).
+  # Policies name the bucket rather than !Ref it, which avoids a circular
+  # dependency between the bucket and the function its events trigger.
+
+  CreateExpenseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: createExpense.main
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ExpensesTable }
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Method: POST, Path: /expenses } }
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: cjs
+        Target: es2022
+        Minify: true
+        Sourcemap: true
+        EntryPoints: [src/handlers/createExpense.ts]
+
+  ListExpensesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: listExpenses.main
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ExpensesTable }
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Method: GET, Path: /expenses } }
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Format: cjs, Target: es2022, Minify: true, Sourcemap: true, EntryPoints: [src/handlers/listExpenses.ts] }
+
+  GetExpenseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: getExpense.main
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ExpensesTable }
+        - S3ReadPolicy: { BucketName: !Sub '${AWS::StackName}-receipts-${AWS::AccountId}' }
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Method: GET, Path: '/expenses/{id}' } }
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Format: cjs, Target: es2022, Minify: true, Sourcemap: true, EntryPoints: [src/handlers/getExpense.ts] }
+
+  DeleteExpenseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: deleteExpense.main
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ExpensesTable }
+        - S3CrudPolicy: { BucketName: !Sub '${AWS::StackName}-receipts-${AWS::AccountId}' }
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Method: DELETE, Path: '/expenses/{id}' } }
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Format: cjs, Target: es2022, Minify: true, Sourcemap: true, EntryPoints: [src/handlers/deleteExpense.ts] }
+
+  RequestReceiptUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: requestReceiptUpload.main
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ExpensesTable }
+        - S3WritePolicy: { BucketName: !Sub '${AWS::StackName}-receipts-${AWS::AccountId}' }
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Method: POST, Path: '/expenses/{id}/receipt' } }
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Format: cjs, Target: es2022, Minify: true, Sourcemap: true, EntryPoints: [src/handlers/requestReceiptUpload.ts] }
+
+  SummaryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: summary.main
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ExpensesTable }
+      Events:
+        Api: { Type: HttpApi, Properties: { ApiId: !Ref Api, Method: GET, Path: /summary } }
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Format: cjs, Target: es2022, Minify: true, Sourcemap: true, EntryPoints: [src/handlers/summary.ts] }
+
+  OnReceiptUploadedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: onReceiptUploaded.main
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ExpensesTable }
+      Events:
+        Uploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref ReceiptsBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules: [{ Name: prefix, Value: receipts/ }]
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Format: cjs, Target: es2022, Minify: true, Sourcemap: true, EntryPoints: [src/handlers/onReceiptUploaded.ts] }
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the API
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com'
+  TableName:
+    Value: !Ref ExpensesTable
+  BucketName:
+    Value: !Ref ReceiptsBucket

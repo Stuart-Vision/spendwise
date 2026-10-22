@@ -1,0 +1,36 @@
+# Deploys the stack to AWS. Run it from the Actions tab ("Run workflow").
+# Uses GitHub's OIDC identity to assume an IAM role, so no long-lived AWS keys
+# are stored in GitHub. Set the repository secret AWS_DEPLOY_ROLE_ARN first.
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SAM_CLI_TELEMETRY: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-1
+      - run: sam build
+      - run: sam deploy --no-confirm-changeset --no-fail-on-empty-changeset
+      - name: API URL
+        run: aws cloudformation describe-stacks --stack-name spendwise --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text

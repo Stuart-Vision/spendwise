@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Handler tests (API Gateway events against an in-memory DynamoDB)
+        run: npm test
+
+  sam:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ap-southeast-1
+      SAM_CLI_TELEMETRY: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - name: Validate and lint the template
+        run: sam validate --lint
+      - name: Build the Lambda bundles
+        run: sam build
